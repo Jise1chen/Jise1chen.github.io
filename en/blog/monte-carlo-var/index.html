@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="From the definition of VaR to a working Monte Carlo estimator: the simulation steps under geometric Brownian motion, Python code for a single asset and a correlated portfolio, simulation error, fat tails and expected shortfall."><meta name="theme-color" content="#f5f5f3"><title>Estimating VaR with Monte Carlo simulation · Ziqing (Stephen) Chen</title><link rel="stylesheet" href="../../../style.css"><link rel="canonical" href="https://jise1chen.github.io/en/blog/monte-carlo-var/"><link rel="alternate" hreflang="zh-CN" href="https://jise1chen.github.io/blog/monte-carlo-var/"><link rel="alternate" hreflang="en" href="https://jise1chen.github.io/en/blog/monte-carlo-var/"><link rel="alternate" hreflang="x-default" href="https://jise1chen.github.io/blog/monte-carlo-var/"></head>
+<body id="top"><a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../../" aria-label="Stephen Chen">SC<span>.</span></a><div class="header-controls"><nav aria-label="Main navigation"><a href="../../#about">About</a><a href="../../#projects">Experience</a><a href="../../#blog">Notes</a><a href="../../#contact">Contact</a></nav><div class="language-switch" aria-label="Language"><a href="../../../blog/monte-carlo-var/" lang="zh-CN" hreflang="zh-CN">中文</a><span aria-hidden="true">/</span><a href="./" lang="en" hreflang="en" aria-current="page">EN</a></div></div></header>
+<main id="main" class="wrap"><article class="article">
+<header class="article-header"><a class="article-back" href="../../#blog">← Back to research & notes</a><p class="eyebrow">RISK MANAGEMENT</p><h1>Estimating VaR with Monte Carlo simulation</h1><p class="article-meta"><span>Ziqing (Stephen) Chen</span><time datetime="2026-10-09">Oct 9, 2026</time></p></header>
+<div class="article-body">
+<section aria-labelledby="s-intro"><h2 id="s-intro">Introduction</h2>
+<p>The question risk managers hear most often is: under normal market conditions, how much can this portfolio lose? Value at Risk (VaR) answers it with a single number, which is why it became the common language of risk for banks, funds and regulators.</p>
+<p>The hard part of computing VaR is estimating the tail of the profit-and-loss distribution. When a portfolio holds only linear positions and returns are roughly normal, one formula is enough. Add options or path-dependent products, or switch to a more realistic price model, and the closed form disappears. Monte Carlo simulation takes the direct route: if the distribution cannot be written down, simulate it and read the quantile off the sample.</p>
+<p>This note defines VaR, derives the simulation steps under geometric Brownian motion, implements the single-asset and multi-asset cases in Python, and closes with simulation error and the limits of the method.</p></section>
+
+<section aria-labelledby="s-def"><h2 id="s-def">What VaR is</h2>
+<p>VaR is a quantile of the loss distribution: for a given holding period and confidence level <i>α</i>, the probability that the loss exceeds VaR is at most 1 − <i>α</i>. Writing the loss over the holding period as <i>L</i> = <i>V</i><sub>0</sub> − <i>V</i><sub><i>T</i></sub>,</p>
+<div class="math-block" role="math" aria-label="Definition of VaR"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mo>=</mo><mi>inf</mi><mo>⁡</mo><mo stretchy="false">{</mo><mtext> </mtext><mi mathvariant="normal">ℓ</mi><mo>∈</mo><mi mathvariant="normal">ℝ</mi><mo>:</mo><mi>P</mi><mo stretchy="false">(</mo><mi>L</mi><mo>&gt;</mo><mi mathvariant="normal">ℓ</mi><mo stretchy="false">)</mo><mo>≤</mo><mn>1</mn><mo>−</mo><mi>α</mi><mtext> </mtext><mo stretchy="false">}</mo></mrow><annotation encoding="application/x-tex">\mathrm{VaR}_\alpha(L) = \inf\{\, \ell \in \mathbb{R} : P(L &gt; \ell) \le 1 - \alpha \,\}</annotation></semantics></math></div>
+<p>For example, “the 10-day 99% VaR is CNY 86,000” means that over the next 10 trading days the chance of losing more than CNY 86,000 is only 1%. It says nothing about how large the loss is in that 1% of cases, a point we return to below.</p>
+<p>Three methods are in common use. They differ in how they obtain the P&amp;L distribution.</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">Method</th><th scope="col">Where the distribution comes from</th><th scope="col">Strength</th><th scope="col">Weakness</th></tr></thead><tbody><tr><th scope="row">Parametric (variance–covariance)</th><td>Assume normal returns and apply a formula</td><td>Fastest; closed form</td><td>Breaks down for non-linear positions and fat tails</td></tr><tr><th scope="row">Historical simulation</th><td>Use past returns directly as future scenarios</td><td>No distributional assumption</td><td>Limited to the history window; what never happened never appears</td></tr><tr><th scope="row">Monte Carlo simulation</th><td>Specify a stochastic model and generate many scenarios</td><td>Models and products can be arbitrarily complex</td><td>Computationally heavy; results depend on the model</td></tr></tbody></table></div></section>
+
+<section aria-labelledby="s-steps"><h2 id="s-steps">The steps of Monte Carlo VaR</h2>
+<p>The method breaks into five steps. Changing the model only touches the first two.</p>
+<ol>
+<li>Choose a price model and estimate its parameters (drift, volatility, correlations).</li>
+<li>Use random numbers to generate <i>N</i> price paths, or <i>N</i> terminal prices directly.</li>
+<li>Revalue the portfolio in each scenario to get its terminal value <i>V</i><sub><i>T</i></sub>.</li>
+<li>Compute the loss in each scenario, <i>L</i> = <i>V</i><sub>0</sub> − <i>V</i><sub><i>T</i></sub>.</li>
+<li>Take the <i>α</i>-quantile of the <i>N</i> losses. That is the VaR estimate.</li>
+</ol>
+<p>The standard starting model is geometric Brownian motion (GBM), which assumes the asset price follows</p>
+<div class="math-block" role="math" aria-label="The GBM stochastic differential equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi>d</mi><msub><mi>S</mi><mi>t</mi></msub><mo>=</mo><mi>μ</mi><msub><mi>S</mi><mi>t</mi></msub><mtext> </mtext><mi>d</mi><mi>t</mi><mo>+</mo><mi>σ</mi><msub><mi>S</mi><mi>t</mi></msub><mtext> </mtext><mi>d</mi><msub><mi>W</mi><mi>t</mi></msub></mrow><annotation encoding="application/x-tex">dS_t = \mu S_t\,dt + \sigma S_t\,dW_t</annotation></semantics></math></div>
+<p>where <i>μ</i> is the annualized drift, <i>σ</i> the annualized volatility and <i>W</i> a standard Brownian motion. Applying Itô’s lemma to ln <i>S</i> gives the exact solution for the terminal price:</p>
+<div class="math-block" role="math" aria-label="Exact solution of GBM"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mi>S</mi><mi>T</mi></msub><mo>=</mo><msub><mi>S</mi><mn>0</mn></msub><mi>exp</mi><mo>⁡</mo><mtext> ⁣</mtext><mrow><mo fence="true">[</mo><mrow><mo fence="true">(</mo><mi>μ</mi><mo>−</mo><mstyle scriptlevel="0" displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><msup><mi>σ</mi><mn>2</mn></msup><mo fence="true">)</mo></mrow><mi>T</mi><mo>+</mo><mi>σ</mi><msqrt><mi>T</mi></msqrt><mtext> </mtext><mi>Z</mi><mo fence="true">]</mo></mrow><mo separator="true">,</mo><mspace width="2em"/><mi>Z</mi><mo>∼</mo><mi>N</mi><mo stretchy="false">(</mo><mn>0</mn><mo separator="true">,</mo><mn>1</mn><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">S_T = S_0 \exp\!\left[\left(\mu - \tfrac{1}{2}\sigma^2\right)T + \sigma\sqrt{T}\,Z\right], \qquad Z \sim N(0,1)</annotation></semantics></math></div>
+<p>Two things are worth noticing. First, the exponent contains <i>μ</i> − <i>σ</i><sup>2</sup>/2 rather than <i>μ</i>. The extra term is the Itô correction, and dropping it is the most common beginner mistake. Second, because GBM has an exact solution, a single standard normal draw reaches the horizon in one step, with no need to slice the holding period. Step-by-step discretization is only needed when the model has no exact solution or the product is path-dependent.</p></section>
+
+<section aria-labelledby="s-single"><h2 id="s-single">Python implementation: a single asset</h2>
+<p>Start with the simplest case: a CNY 1,000,000 position in one stock with 8% annualized drift and 20% annualized volatility, and a 10-trading-day VaR at the 99% confidence level.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def mc_var_single(V0, mu, sigma, T, alpha, n_sims, seed=None):
+    rng = np.random.default_rng(seed)
+    z = rng.standard_normal(n_sims)
+    # Exact GBM solution: one step to the horizon
+    VT = V0 * np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * z)
+    loss = V0 - VT                      # losses are positive
+    var = np.quantile(loss, alpha)      # alpha-quantile of the loss distribution
+    es = loss[loss &gt;= var].mean()       # average loss beyond VaR
+    return var, es
+
+V0, mu, sigma, T, alpha = 1_000_000, 0.08, 0.20, 10 / 252, 0.99
+var, es = mc_var_single(V0, mu, sigma, T, alpha, 100_000, seed=42)</code></pre>
+<p>With 100,000 simulations the VaR comes out at CNY 86,970, and the expected shortfall (ES) computed alongside it at CNY 99,329.</p>
+<p>The advantage of this example is that a closed form exists to check against. The loss is a monotone function of <i>Z</i>, so substituting the 1% quantile of <i>Z</i> into the exact solution is enough:</p>
+<div class="math-block" role="math" aria-label="Closed-form single-asset VaR"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo>=</mo><msub><mi>V</mi><mn>0</mn></msub><mrow><mo fence="true">[</mo><mn>1</mn><mo>−</mo><mi>exp</mi><mo>⁡</mo><mtext> ⁣</mtext><mrow><mo fence="true">(</mo><mrow><mo fence="true">(</mo><mi>μ</mi><mo>−</mo><mstyle scriptlevel="0" displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><msup><mi>σ</mi><mn>2</mn></msup><mo fence="true">)</mo></mrow><mi>T</mi><mo>+</mo><mi>σ</mi><msqrt><mi>T</mi></msqrt><mtext> </mtext><msup><mi mathvariant="normal">Φ</mi><mrow><mo>−</mo><mn>1</mn></mrow></msup><mo stretchy="false">(</mo><mn>1</mn><mo>−</mo><mi>α</mi><mo stretchy="false">)</mo><mo fence="true">)</mo></mrow><mo fence="true">]</mo></mrow></mrow><annotation encoding="application/x-tex">\mathrm{VaR}_\alpha = V_0\left[1 - \exp\!\left(\left(\mu - \tfrac{1}{2}\sigma^2\right)T + \sigma\sqrt{T}\,\Phi^{-1}(1-\alpha)\right)\right]</annotation></semantics></math></div>
+<pre><code class="language-python">exact = V0 * (1 - np.exp((mu - 0.5 * sigma**2) * T
+                         + sigma * np.sqrt(T) * norm.ppf(1 - alpha)))</code></pre>
+<p>The closed-form value is CNY 86,346, about 0.7% away from the simulated one. Whenever you write a Monte Carlo program, check it this way against a special case with a known answer before moving on to problems that have none.</p></section>
+
+<section aria-labelledby="s-port"><h2 id="s-port">A multi-asset portfolio: handling correlation</h2>
+<p>With several assets, the key is to make the simulated random numbers preserve the correlations between them. The standard approach is a Cholesky factorization of the correlation matrix, <i>ρ</i> = <i>LL</i><sup>⊤</sup>, with <i>L</i> then used to turn independent standard normals into correlated ones:</p>
+<div class="math-block" role="math" aria-label="Generating correlated normals with the Cholesky factor"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi mathvariant="normal">𝐙</mi><mo>=</mo><mi>L</mi><mtext> </mtext><mi mathvariant="normal">𝜺</mi><mo separator="true">,</mo><mspace width="2em"/><mi mathvariant="normal">𝜺</mi><mo>∼</mo><mi>N</mi><mo stretchy="false">(</mo><mn mathvariant="normal">𝟎</mn><mo separator="true">,</mo><mi>I</mi><mo stretchy="false">)</mo><mtext>  </mtext><mo>⟹</mo><mtext>  </mtext><mrow><mi mathvariant="normal">C</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">v</mi></mrow><mo stretchy="false">(</mo><mi mathvariant="normal">𝐙</mi><mo stretchy="false">)</mo><mo>=</mo><mi>L</mi><msup><mi>L</mi><mi mathvariant="normal">⊤</mi></msup><mo>=</mo><mi>ρ</mi></mrow><annotation encoding="application/x-tex">\mathbf{Z} = L\,\boldsymbol{\varepsilon}, \qquad \boldsymbol{\varepsilon} \sim N(\mathbf{0}, I) \;\Longrightarrow\; \mathrm{Cov}(\mathbf{Z}) = LL^{\top} = \rho</annotation></semantics></math></div>
+<p>The example below is a CNY 1,000,000 three-asset portfolio with weights of 50%, 30% and 20%.</p>
+<pre><code class="language-python">def mc_var_portfolio(V0, w, mu, sigma, corr, T, alpha, n_sims, seed=None):
+    rng = np.random.default_rng(seed)
+    L = np.linalg.cholesky(corr)
+    # one scenario per row; right-multiplying by L.T applies L @ eps to each
+    z = rng.standard_normal((n_sims, len(w))) @ L.T
+    growth = np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * z)
+    VT = V0 * (growth @ w)              # aggregate terminal asset values at initial weights
+    loss = V0 - VT
+    var = np.quantile(loss, alpha)
+    es = loss[loss &gt;= var].mean()
+    return var, es
+
+w     = np.array([0.5, 0.3, 0.2])
+mu    = np.array([0.08, 0.06, 0.10])
+sigma = np.array([0.20, 0.15, 0.30])
+corr  = np.array([[1.0, 0.6, 0.3],
+                  [0.6, 1.0, 0.2],
+                  [0.3, 0.2, 1.0]])
+
+var, es = mc_var_portfolio(1_000_000, w, mu, sigma, corr, 10 / 252, 0.99, 100_000, seed=42)</code></pre>
+<p>The portfolio’s 10-day 99% VaR is CNY 69,630 and its ES is CNY 78,946.</p>
+<p>Computing VaR for each asset on its own and adding them up gives CNY 88,355. The portfolio VaR is CNY 18,725 lower, about 21%, and that gap is the risk reduction from diversification. As a cross-check, the parametric (delta-normal) method gives CNY 71,204, about 2% from the simulated value. The difference comes from the linear approximation the parametric method applies to a lognormal distribution.</p>
+<p>One practical caveat: Cholesky factorization requires a positive-definite matrix. A correlation matrix estimated from history can fail that test when there are many assets and a short sample, in which case it has to be repaired first (for example by finding the nearest positive-definite matrix).</p></section>
+
+<section aria-labelledby="s-error"><h2 id="s-error">Simulation error and convergence</h2>
+<p>A Monte Carlo VaR is itself a random variable. Change the seed and the result changes, with an error that shrinks at rate 1/√<i>N</i>. The asymptotic standard error of a sample quantile is</p>
+<div class="math-block" role="math" aria-label="Asymptotic standard error of a sample quantile"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mrow><mi mathvariant="normal">S</mi><mi mathvariant="normal">E</mi></mrow><mtext> ⁣</mtext><mrow><mo fence="true">(</mo><msub><mover accent="true"><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mo stretchy="true">^</mo></mover><mi>α</mi></msub><mo fence="true">)</mo></mrow><mo>≈</mo><mfrac><mn>1</mn><mrow><mi>f</mi><mo stretchy="false">(</mo><msub><mi>q</mi><mi>α</mi></msub><mo stretchy="false">)</mo></mrow></mfrac><msqrt><mfrac><mrow><mi>α</mi><mo stretchy="false">(</mo><mn>1</mn><mo>−</mo><mi>α</mi><mo stretchy="false">)</mo></mrow><mi>N</mi></mfrac></msqrt></mrow><annotation encoding="application/x-tex">\mathrm{SE}\!\left(\widehat{\mathrm{VaR}}_\alpha\right) \approx \frac{1}{f(q_\alpha)}\sqrt{\frac{\alpha(1-\alpha)}{N}}</annotation></semantics></math></div>
+<p>where <i>f</i>(<i>q</i><sub><i>α</i></sub>) is the loss density at the quantile. The higher the confidence level, the smaller the tail density and the larger the error: a 99.9% VaR needs far more simulations than a 99% one.</p>
+<p>As an experiment on the single-asset example, each <i>N</i> was run with 200 different seeds, recording the mean and standard deviation of the VaR estimates (closed-form value: CNY 86,346).</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">Simulations <i>N</i></th><th class="num" scope="col">Mean estimate (CNY)</th><th class="num" scope="col">Std. dev. (CNY)</th><th class="num" scope="col">Std. dev. / closed form</th></tr></thead><tbody><tr><th scope="row">1,000</th><td class="num">85,622</td><td class="num">4,409</td><td class="num">5.11%</td></tr><tr><th scope="row">10,000</th><td class="num">86,115</td><td class="num">1,205</td><td class="num">1.40%</td></tr><tr><th scope="row">100,000</th><td class="num">86,307</td><td class="num">424</td><td class="num">0.49%</td></tr><tr><th scope="row">1,000,000</th><td class="num">86,333</td><td class="num">127</td><td class="num">0.15%</td></tr></tbody></table></div>
+<p>Each tenfold increase in <i>N</i> cuts the standard deviation to roughly a third, in line with the theoretical 1/√<i>N</i> rate. At <i>N</i> = 1,000 the 99% quantile is determined by the 10 largest samples alone, and a 5% standard deviation makes the result close to unusable.</p>
+<p>Two recommendations for practice. First, report a standard error or confidence interval alongside the VaR, estimated by repeating over several seeds or by bootstrap. Second, when the compute budget is tight, antithetic variates, importance sampling and quasi-Monte Carlo (Sobol sequences) all reduce the error substantially at the same <i>N</i>. Importance sampling is especially effective for tail quantiles.</p></section>
+
+<section aria-labelledby="s-limits"><h2 id="s-limits">Limitations and improvements</h2>
+<p>The quality of a Monte Carlo VaR is capped by the model: more simulations only compute a possibly wrong distribution more precisely. Three issues deserve the most attention.</p>
+<h3>Fat tails</h3>
+<p>GBM assumes normally distributed log returns, while real returns have visibly fatter tails. Replacing the normal shock with a Student-t with 4 degrees of freedom, rescaled to unit variance so the volatility stays the same, is a one-line change:</p>
+<pre><code class="language-python">nu = 4
+z = rng.standard_t(nu, n_sims) * np.sqrt((nu - 2) / nu)   # rescale to unit variance</code></pre>
+<p>With every other parameter as in the single-asset example, 100,000 simulations give the following.</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">Confidence level</th><th class="num" scope="col">Normal-shock VaR (CNY)</th><th class="num" scope="col">t(4)-shock VaR (CNY)</th><th class="num" scope="col">Difference</th></tr></thead><tbody><tr><th scope="row">99%</th><td class="num">86,346</td><td class="num">97,395</td><td class="num">+13%</td></tr><tr><th scope="row">99.9%</th><td class="num">113,733</td><td class="num">174,480</td><td class="num">+53%</td></tr></tbody></table></div>
+<p>The two models have exactly the same volatility, yet the gap widens the further into the tail you go. The normal assumption understates risk precisely where accuracy matters most.</p>
+<h3>Volatility is not constant</h3>
+<p>GBM treats <i>σ</i> as a constant, whereas real volatility clusters and is negatively correlated with price. There are two families of improvement: GARCH-type models that update the conditional volatility day by day, and stochastic volatility models such as Heston that let the variance follow its own random process. Neither generally has an exact solution for the terminal price, so the holding period has to be simulated in small steps, and this is exactly where Monte Carlo has the edge over the parametric method.</p>
+<h3>Flaws in VaR as a measure</h3>
+<p>VaR only says where the quantile is. It does not describe how large losses are beyond it. It is also not subadditive: under some distributions the VaR of a portfolio can exceed the sum of the VaRs of its parts, contradicting the intuition that diversification reduces risk.</p>
+<p>Expected shortfall (ES) addresses both points. It is the conditional mean of the loss given that it exceeds VaR:</p>
+<div class="math-block" role="math" aria-label="Definition of expected shortfall"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">E</mi><mi mathvariant="normal">S</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mo>=</mo><mi>E</mi><mrow><mo fence="true">[</mo><mtext> </mtext><mi>L</mi><mo>∣</mo><mi>L</mi><mo>≥</mo><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mtext> </mtext><mo fence="true">]</mo></mrow></mrow><annotation encoding="application/x-tex">\mathrm{ES}_\alpha(L) = E\left[\,L \mid L \ge \mathrm{VaR}_\alpha(L)\,\right]</annotation></semantics></math></div>
+<p>The code above already computes ES along the way, and in a Monte Carlo framework it costs almost nothing extra. The Basel Committee’s revised market risk framework (FRTB) has likewise replaced 99% VaR with 97.5% ES as the capital measure under the internal models approach.</p></section>
+
+<section aria-labelledby="s-summary"><h2 id="s-summary">Summary</h2>
+<p>Monte Carlo VaR is a five-step framework: choose a model, generate scenarios, revalue, compute losses, take the quantile. Its value is flexibility, since the model and the products can be swapped as needed while the framework stays the same.</p>
+<p>Three things to keep in mind when using it:</p>
+<ul>
+<li>Check the code against a special case with a closed form before tackling harder problems.</li>
+<li>Simulation error falls at rate 1/√<i>N</i>, so report a standard error with the result.</li>
+<li>Model risk outweighs simulation error: the distributional assumption affects tail results far more than the number of simulations.</li>
+</ul>
+<p class="article-note">Every figure in this note was produced by running the code shown here in NumPy with random seed 42 (the convergence experiment uses seeds 0 to 199).</p></section>
+</div>
+<a class="article-back" href="../../#blog">← Back to research & notes</a>
+</article></main>
+<footer class="site-footer wrap"><span>© 2026 Ziqing (Stephen) Chen</span><a href="#top">Back to top ↑</a></footer></body></html>

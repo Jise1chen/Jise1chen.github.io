@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="从 VaR 的定义出发，用几何布朗运动推导蒙特卡洛模拟步骤，给出单资产与多资产组合的 Python 实现，并讨论模拟误差、厚尾与期望损失。"><meta name="theme-color" content="#f5f5f3"><title>用蒙特卡洛模拟计算 VaR 值 · Ziqing (Stephen) Chen</title><link rel="stylesheet" href="../../style.css"><link rel="canonical" href="https://jise1chen.github.io/blog/monte-carlo-var/"><link rel="alternate" hreflang="zh-CN" href="https://jise1chen.github.io/blog/monte-carlo-var/"><link rel="alternate" hreflang="en" href="https://jise1chen.github.io/en/blog/monte-carlo-var/"><link rel="alternate" hreflang="x-default" href="https://jise1chen.github.io/blog/monte-carlo-var/"></head>
+<body id="top"><a class="skip-link" href="#main">跳转到正文</a>
+<header class="site-header wrap"><a class="brand" href="../../" aria-label="Stephen Chen">SC<span>.</span></a><div class="header-controls"><nav aria-label="主导航"><a href="../../#about">关于我</a><a href="../../#projects">项目经历</a><a href="../../#blog">博客</a><a href="../../#contact">联系</a></nav><div class="language-switch" aria-label="Language"><a href="./" lang="zh-CN" hreflang="zh-CN" aria-current="page">中文</a><span aria-hidden="true">/</span><a href="../../en/blog/monte-carlo-var/" lang="en" hreflang="en">EN</a></div></div></header>
+<main id="main" class="wrap"><article class="article">
+<header class="article-header"><a class="article-back" href="../../#blog">← 返回研究与笔记</a><p class="eyebrow">RISK MANAGEMENT</p><h1>用蒙特卡洛模拟计算 VaR 值</h1><p class="article-meta"><span>Ziqing (Stephen) Chen</span><time datetime="2026-10-09">2026.10.09</time></p></header>
+<div class="article-body">
+<section aria-labelledby="s-intro"><h2 id="s-intro">引言</h2>
+<p>风险管理里最常被问到的一个问题是：在正常市场条件下，这个组合最多会亏多少？VaR（Value at Risk，在险价值）用一个数字回答它，因此成了银行、基金和监管机构通用的风险语言。</p>
+<p>计算 VaR 的难点在于估计损益分布的尾部。当组合里只有线性头寸、收益率近似正态时，一个公式就够了。一旦加入期权、路径依赖产品，或者想换一个更真实的价格模型，解析解就不存在了。蒙特卡洛模拟的思路很直接：既然分布写不出来，就把它模拟出来，再从模拟结果里读分位数。</p>
+<p>本文先给出 VaR 的定义，再用几何布朗运动推导模拟步骤，然后用 Python 实现单资产和多资产两种情形，最后讨论模拟误差和方法的局限。</p></section>
+
+<section aria-labelledby="s-def"><h2 id="s-def">什么是 VaR</h2>
+<p>VaR 是损失分布的一个分位数：在给定持有期和置信水平 <i>α</i> 下，损失超过 VaR 的概率不大于 1 − <i>α</i>。记持有期内的损失为 <i>L</i> = <i>V</i><sub>0</sub> − <i>V</i><sub><i>T</i></sub>，则</p>
+<div class="math-block" role="math" aria-label="VaR 的定义"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mo>=</mo><mi>inf</mi><mo>⁡</mo><mo stretchy="false">{</mo><mtext> </mtext><mi mathvariant="normal">ℓ</mi><mo>∈</mo><mi mathvariant="normal">ℝ</mi><mo>:</mo><mi>P</mi><mo stretchy="false">(</mo><mi>L</mi><mo>&gt;</mo><mi mathvariant="normal">ℓ</mi><mo stretchy="false">)</mo><mo>≤</mo><mn>1</mn><mo>−</mo><mi>α</mi><mtext> </mtext><mo stretchy="false">}</mo></mrow><annotation encoding="application/x-tex">\mathrm{VaR}_\alpha(L) = \inf\{\, \ell \in \mathbb{R} : P(L &gt; \ell) \le 1 - \alpha \,\}</annotation></semantics></math></div>
+<p>举例来说，“10 天 99% VaR 为 8.6 万元”的意思是：未来 10 个交易日里，亏损超过 8.6 万元的概率只有 1%。它没有说那 1% 的情形里会亏多少，这一点后面还会回来。</p>
+<p>常用的计算方法有三种，区别在于如何得到损益分布。</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">方法</th><th scope="col">分布从哪里来</th><th scope="col">优点</th><th scope="col">缺点</th></tr></thead><tbody><tr><th scope="row">参数法（方差-协方差）</th><td>假设收益率服从正态分布，直接套公式</td><td>计算最快，有解析解</td><td>对非线性头寸和厚尾失效</td></tr><tr><th scope="row">历史模拟法</th><td>把历史收益率直接当作未来情景</td><td>不需要分布假设</td><td>受限于历史窗口，没发生过的情形不会出现</td></tr><tr><th scope="row">蒙特卡洛模拟法</th><td>设定随机模型，生成大量情景</td><td>模型和产品都可以任意复杂</td><td>计算量大，结果依赖模型设定</td></tr></tbody></table></div></section>
+
+<section aria-labelledby="s-steps"><h2 id="s-steps">蒙特卡洛 VaR 的步骤</h2>
+<p>整个方法可以拆成五步，换模型时只需要改第一步和第二步。</p>
+<ol>
+<li>选定价格模型，并估计它的参数（漂移、波动率、相关性）。</li>
+<li>用随机数生成 <i>N</i> 条价格路径，或者直接生成 <i>N</i> 个期末价格。</li>
+<li>在每个情景下对组合重新估值，得到期末价值 <i>V</i><sub><i>T</i></sub>。</li>
+<li>计算每个情景的损失 <i>L</i> = <i>V</i><sub>0</sub> − <i>V</i><sub><i>T</i></sub>。</li>
+<li>取这 <i>N</i> 个损失的 <i>α</i> 分位数，即为 VaR 的估计值。</li>
+</ol>
+<p>最常用的入门模型是几何布朗运动（GBM），它假设资产价格满足</p>
+<div class="math-block" role="math" aria-label="几何布朗运动的随机微分方程"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi>d</mi><msub><mi>S</mi><mi>t</mi></msub><mo>=</mo><mi>μ</mi><msub><mi>S</mi><mi>t</mi></msub><mtext> </mtext><mi>d</mi><mi>t</mi><mo>+</mo><mi>σ</mi><msub><mi>S</mi><mi>t</mi></msub><mtext> </mtext><mi>d</mi><msub><mi>W</mi><mi>t</mi></msub></mrow><annotation encoding="application/x-tex">dS_t = \mu S_t\,dt + \sigma S_t\,dW_t</annotation></semantics></math></div>
+<p>其中 <i>μ</i> 是年化漂移率，<i>σ</i> 是年化波动率，<i>W</i> 是标准布朗运动。对 ln <i>S</i> 用伊藤引理，可以得到期末价格的精确解：</p>
+<div class="math-block" role="math" aria-label="几何布朗运动的精确解"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mi>S</mi><mi>T</mi></msub><mo>=</mo><msub><mi>S</mi><mn>0</mn></msub><mi>exp</mi><mo>⁡</mo><mtext> ⁣</mtext><mrow><mo fence="true">[</mo><mrow><mo fence="true">(</mo><mi>μ</mi><mo>−</mo><mstyle scriptlevel="0" displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><msup><mi>σ</mi><mn>2</mn></msup><mo fence="true">)</mo></mrow><mi>T</mi><mo>+</mo><mi>σ</mi><msqrt><mi>T</mi></msqrt><mtext> </mtext><mi>Z</mi><mo fence="true">]</mo></mrow><mo separator="true">,</mo><mspace width="2em"/><mi>Z</mi><mo>∼</mo><mi>N</mi><mo stretchy="false">(</mo><mn>0</mn><mo separator="true">,</mo><mn>1</mn><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">S_T = S_0 \exp\!\left[\left(\mu - \tfrac{1}{2}\sigma^2\right)T + \sigma\sqrt{T}\,Z\right], \qquad Z \sim N(0,1)</annotation></semantics></math></div>
+<p>这个解有两点值得注意。第一，指数里是 <i>μ</i> − <i>σ</i><sup>2</sup>/2 而不是 <i>μ</i>，这一项来自伊藤修正，漏掉它是初学者最常见的错误。第二，GBM 有精确解，所以只需要抽一个标准正态数就能一步到达期末，不必把持有期切成小步。只有当模型没有精确解，或者产品依赖路径时，才需要逐步离散模拟。</p></section>
+
+<section aria-labelledby="s-single"><h2 id="s-single">Python 实现：单资产</h2>
+<p>先看最简单的情形：持有 100 万元的单一股票，年化漂移 8%，年化波动率 20%，求 10 个交易日、99% 置信水平的 VaR。</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def mc_var_single(V0, mu, sigma, T, alpha, n_sims, seed=None):
+    rng = np.random.default_rng(seed)
+    z = rng.standard_normal(n_sims)
+    # GBM 精确解：一步到达期末
+    VT = V0 * np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * z)
+    loss = V0 - VT                      # 损失为正
+    var = np.quantile(loss, alpha)      # 损失分布的 alpha 分位数
+    es = loss[loss &gt;= var].mean()       # 超过 VaR 部分的平均损失
+    return var, es
+
+V0, mu, sigma, T, alpha = 1_000_000, 0.08, 0.20, 10 / 252, 0.99
+var, es = mc_var_single(V0, mu, sigma, T, alpha, 100_000, seed=42)</code></pre>
+<p>模拟 10 万次得到的 VaR 是 86,970 元，同时算出的期望损失（ES）是 99,329 元。</p>
+<p>这个例子的好处是有解析解可以对照。损失是 <i>Z</i> 的单调函数，所以把 <i>Z</i> 的 1% 分位数直接代入精确解即可：</p>
+<div class="math-block" role="math" aria-label="单资产 VaR 的解析解"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo>=</mo><msub><mi>V</mi><mn>0</mn></msub><mrow><mo fence="true">[</mo><mn>1</mn><mo>−</mo><mi>exp</mi><mo>⁡</mo><mtext> ⁣</mtext><mrow><mo fence="true">(</mo><mrow><mo fence="true">(</mo><mi>μ</mi><mo>−</mo><mstyle scriptlevel="0" displaystyle="false"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><msup><mi>σ</mi><mn>2</mn></msup><mo fence="true">)</mo></mrow><mi>T</mi><mo>+</mo><mi>σ</mi><msqrt><mi>T</mi></msqrt><mtext> </mtext><msup><mi mathvariant="normal">Φ</mi><mrow><mo>−</mo><mn>1</mn></mrow></msup><mo stretchy="false">(</mo><mn>1</mn><mo>−</mo><mi>α</mi><mo stretchy="false">)</mo><mo fence="true">)</mo></mrow><mo fence="true">]</mo></mrow></mrow><annotation encoding="application/x-tex">\mathrm{VaR}_\alpha = V_0\left[1 - \exp\!\left(\left(\mu - \tfrac{1}{2}\sigma^2\right)T + \sigma\sqrt{T}\,\Phi^{-1}(1-\alpha)\right)\right]</annotation></semantics></math></div>
+<pre><code class="language-python">exact = V0 * (1 - np.exp((mu - 0.5 * sigma**2) * T
+                         + sigma * np.sqrt(T) * norm.ppf(1 - alpha)))</code></pre>
+<p>解析值是 86,346 元，模拟值与它相差约 0.7%。写任何蒙特卡洛程序时，都建议先找一个有解析解的特例做这样的核对，再去算没有解析解的问题。</p></section>
+
+<section aria-labelledby="s-port"><h2 id="s-port">多资产组合：处理相关性</h2>
+<p>组合里有多只资产时，关键是让模拟出的随机数保留资产之间的相关性。标准做法是对相关系数矩阵 <i>ρ</i> 做 Cholesky 分解 <i>ρ</i> = <i>LL</i><sup>⊤</sup>，再用 <i>L</i> 把独立的标准正态向量变成相关的：</p>
+<div class="math-block" role="math" aria-label="用 Cholesky 因子生成相关的正态向量"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi mathvariant="normal">𝐙</mi><mo>=</mo><mi>L</mi><mtext> </mtext><mi mathvariant="normal">𝜺</mi><mo separator="true">,</mo><mspace width="2em"/><mi mathvariant="normal">𝜺</mi><mo>∼</mo><mi>N</mi><mo stretchy="false">(</mo><mn mathvariant="normal">𝟎</mn><mo separator="true">,</mo><mi>I</mi><mo stretchy="false">)</mo><mtext>  </mtext><mo>⟹</mo><mtext>  </mtext><mrow><mi mathvariant="normal">C</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">v</mi></mrow><mo stretchy="false">(</mo><mi mathvariant="normal">𝐙</mi><mo stretchy="false">)</mo><mo>=</mo><mi>L</mi><msup><mi>L</mi><mi mathvariant="normal">⊤</mi></msup><mo>=</mo><mi>ρ</mi></mrow><annotation encoding="application/x-tex">\mathbf{Z} = L\,\boldsymbol{\varepsilon}, \qquad \boldsymbol{\varepsilon} \sim N(\mathbf{0}, I) \;\Longrightarrow\; \mathrm{Cov}(\mathbf{Z}) = LL^{\top} = \rho</annotation></semantics></math></div>
+<p>下面的例子是一个 100 万元的三资产组合，权重为 50%、30%、20%。</p>
+<pre><code class="language-python">def mc_var_portfolio(V0, w, mu, sigma, corr, T, alpha, n_sims, seed=None):
+    rng = np.random.default_rng(seed)
+    L = np.linalg.cholesky(corr)
+    # 每行是一个情景；右乘 L.T 相当于对每个情景做 L @ eps
+    z = rng.standard_normal((n_sims, len(w))) @ L.T
+    growth = np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * z)
+    VT = V0 * (growth @ w)              # 按初始权重加总各资产期末价值
+    loss = V0 - VT
+    var = np.quantile(loss, alpha)
+    es = loss[loss &gt;= var].mean()
+    return var, es
+
+w     = np.array([0.5, 0.3, 0.2])
+mu    = np.array([0.08, 0.06, 0.10])
+sigma = np.array([0.20, 0.15, 0.30])
+corr  = np.array([[1.0, 0.6, 0.3],
+                  [0.6, 1.0, 0.2],
+                  [0.3, 0.2, 1.0]])
+
+var, es = mc_var_portfolio(1_000_000, w, mu, sigma, corr, 10 / 252, 0.99, 100_000, seed=42)</code></pre>
+<p>组合的 10 天 99% VaR 是 69,630 元，ES 是 78,946 元。</p>
+<p>如果把三只资产各自单独算 VaR 再相加，结果是 88,355 元。组合 VaR 比它低 18,725 元，约 21%，这部分就是分散化带来的风险削减。作为交叉检验，参数法（delta-normal）给出的结果是 71,204 元，与模拟值相差约 2%，差异来自参数法对对数正态分布做的线性近似。</p>
+<p>一个实践上的提醒：Cholesky 分解要求矩阵正定。用历史数据估计出的相关矩阵在资产数量多、样本短时可能不满足，这时需要先做修正（例如求最近的正定矩阵）。</p></section>
+
+<section aria-labelledby="s-error"><h2 id="s-error">模拟误差与收敛速度</h2>
+<p>蒙特卡洛给出的 VaR 本身是一个随机变量，换一个随机种子结果就会变，误差以 1/√<i>N</i> 的速度下降。样本分位数的渐近标准误为</p>
+<div class="math-block" role="math" aria-label="样本分位数的渐近标准误"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mrow><mi mathvariant="normal">S</mi><mi mathvariant="normal">E</mi></mrow><mtext> ⁣</mtext><mrow><mo fence="true">(</mo><msub><mover accent="true"><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mo stretchy="true">^</mo></mover><mi>α</mi></msub><mo fence="true">)</mo></mrow><mo>≈</mo><mfrac><mn>1</mn><mrow><mi>f</mi><mo stretchy="false">(</mo><msub><mi>q</mi><mi>α</mi></msub><mo stretchy="false">)</mo></mrow></mfrac><msqrt><mfrac><mrow><mi>α</mi><mo stretchy="false">(</mo><mn>1</mn><mo>−</mo><mi>α</mi><mo stretchy="false">)</mo></mrow><mi>N</mi></mfrac></msqrt></mrow><annotation encoding="application/x-tex">\mathrm{SE}\!\left(\widehat{\mathrm{VaR}}_\alpha\right) \approx \frac{1}{f(q_\alpha)}\sqrt{\frac{\alpha(1-\alpha)}{N}}</annotation></semantics></math></div>
+<p>其中 <i>f</i>(<i>q</i><sub><i>α</i></sub>) 是损失密度在分位点处的取值。置信水平越高，尾部密度越小，误差就越大：算 99.9% VaR 需要的模拟次数远多于 99%。</p>
+<p>用前面的单资产例子做实验：每个 <i>N</i> 用 200 个不同的种子重复计算，统计 VaR 估计值的均值和标准差（解析值为 86,346 元）。</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">模拟次数 <i>N</i></th><th class="num" scope="col">估计值均值（元）</th><th class="num" scope="col">标准差（元）</th><th class="num" scope="col">标准差 / 解析值</th></tr></thead><tbody><tr><th scope="row">1,000</th><td class="num">85,622</td><td class="num">4,409</td><td class="num">5.11%</td></tr><tr><th scope="row">10,000</th><td class="num">86,115</td><td class="num">1,205</td><td class="num">1.40%</td></tr><tr><th scope="row">100,000</th><td class="num">86,307</td><td class="num">424</td><td class="num">0.49%</td></tr><tr><th scope="row">1,000,000</th><td class="num">86,333</td><td class="num">127</td><td class="num">0.15%</td></tr></tbody></table></div>
+<p><i>N</i> 每扩大 10 倍，标准差大约缩小到原来的三分之一，与 1/√<i>N</i> 的理论速度一致。<i>N</i> = 1,000 时，99% 分位数只由最大的 10 个样本决定，5% 的标准差让结果几乎不可用。</p>
+<p>实务中有两个建议。第一，报告 VaR 时同时给出标准误或置信区间，可以用多个种子重复或 bootstrap 估计。第二，如果计算预算有限，对偶变量、重要性抽样和拟蒙特卡洛（Sobol 序列）都能在相同的 <i>N</i> 下显著降低误差，其中重要性抽样对尾部分位数尤其有效。</p></section>
+
+<section aria-labelledby="s-limits"><h2 id="s-limits">局限与改进</h2>
+<p>蒙特卡洛 VaR 的质量上限由模型决定：模拟次数再多，也只是把一个可能错误的分布算得更准。下面是三个最值得关注的问题。</p>
+<h3>厚尾</h3>
+<p>GBM 假设对数收益率服从正态分布，而真实收益率的尾部明显更厚。把正态冲击换成自由度为 4 的 Student-t 分布，并缩放到方差为 1 以保持波动率不变，只需要改一行：</p>
+<pre><code class="language-python">nu = 4
+z = rng.standard_t(nu, n_sims) * np.sqrt((nu - 2) / nu)   # 方差归一化</code></pre>
+<p>其余参数与单资产例子相同，模拟 10 万次的结果如下。</p>
+<div class="table-scroll"><table><thead><tr><th scope="col">置信水平</th><th class="num" scope="col">正态冲击 VaR（元）</th><th class="num" scope="col">t(4) 冲击 VaR（元）</th><th class="num" scope="col">差异</th></tr></thead><tbody><tr><th scope="row">99%</th><td class="num">86,346</td><td class="num">97,395</td><td class="num">+13%</td></tr><tr><th scope="row">99.9%</th><td class="num">113,733</td><td class="num">174,480</td><td class="num">+53%</td></tr></tbody></table></div>
+<p>两个模型的波动率完全相同，但越往尾部走差距越大。正态假设在最需要准确的地方低估风险。</p>
+<h3>波动率不是常数</h3>
+<p>GBM 把 <i>σ</i> 当作常数，而实际波动率会聚集，并且与价格负相关。改进方向有两类：用 GARCH 族模型逐日更新条件波动率，或者用 Heston 这样的随机波动率模型让方差本身服从一个随机过程。这两类模型一般没有期末价格的精确解，需要把持有期切成小步逐步模拟，这正是蒙特卡洛相对参数法的优势所在。</p>
+<h3>VaR 指标本身的缺陷</h3>
+<p>VaR 只告诉你分位点在哪里，不描述越过分位点之后的损失有多大。它也不满足次可加性：在某些分布下，组合的 VaR 可以大于各部分 VaR 之和，与分散化降低风险的直觉相悖。</p>
+<p>期望损失（Expected Shortfall，ES）弥补了这两点，它是损失超过 VaR 时的条件均值：</p>
+<div class="math-block" role="math" aria-label="期望损失的定义"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mrow><mi mathvariant="normal">E</mi><mi mathvariant="normal">S</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mo>=</mo><mi>E</mi><mrow><mo fence="true">[</mo><mtext> </mtext><mi>L</mi><mo>∣</mo><mi>L</mi><mo>≥</mo><msub><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">R</mi></mrow><mi>α</mi></msub><mo stretchy="false">(</mo><mi>L</mi><mo stretchy="false">)</mo><mtext> </mtext><mo fence="true">]</mo></mrow></mrow><annotation encoding="application/x-tex">\mathrm{ES}_\alpha(L) = E\left[\,L \mid L \ge \mathrm{VaR}_\alpha(L)\,\right]</annotation></semantics></math></div>
+<p>前面的代码已经顺手算了 ES，在蒙特卡洛框架里它几乎没有额外成本。巴塞尔委员会的市场风险新框架（FRTB）也已用 97.5% ES 取代 99% VaR 作为内部模型法的资本计量指标。</p></section>
+
+<section aria-labelledby="s-summary"><h2 id="s-summary">小结</h2>
+<p>蒙特卡洛 VaR 的框架只有五步：定模型、生成情景、重估值、算损失、取分位数。它的价值在于灵活，模型和产品都可以按需要替换，而框架不变。</p>
+<p>使用时记住三件事：</p>
+<ul>
+<li>先用有解析解的特例核对代码，再去算复杂问题。</li>
+<li>模拟误差按 1/√<i>N</i> 下降，报告结果时要附上标准误。</li>
+<li>模型风险大于模拟误差，分布假设对尾部结果的影响远超模拟次数。</li>
+</ul>
+<p class="article-note">本文的全部数字均由文中代码在 NumPy 下以随机种子 42 运行得到（收敛实验使用种子 0 至 199）。</p></section>
+</div>
+<a class="article-back" href="../../#blog">← 返回研究与笔记</a>
+</article></main>
+<footer class="site-footer wrap"><span>© 2026 Ziqing (Stephen) Chen</span><a href="#top">回到顶部 ↑</a></footer></body></html>
